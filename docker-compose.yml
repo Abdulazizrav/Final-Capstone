@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: cosphere_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: cosphere_user
+      POSTGRES_PASSWORD: cosphere_password
+      POSTGRES_DB: cosphere_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - cosphere_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: cosphere_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    networks:
+      - cosphere_network
+
+  server-1:
+    build:
+      context: ./server-1
+      dockerfile: Dockerfile
+    container_name: cosphere_server_1
+    restart: always
+    environment:
+      - PORT=5001
+      - DATABASE_URL=postgresql://cosphere_user:cosphere_password@postgres:5432/cosphere_db?schema=public
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=cosphere_super_secret_jwt_key_12345
+    ports:
+      - "5001:5001"
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - cosphere_network
+
+  server-2:
+    build:
+      context: ./server-2
+      dockerfile: Dockerfile
+    container_name: cosphere_server_2
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql://cosphere_user:cosphere_password@postgres:5432/cosphere_db
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - cosphere_network
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: cosphere_client
+    restart: always
+    environment:
+      - NEXT_PUBLIC_API_URL=/api/v1
+      - NEXT_PUBLIC_WS_URL=/
+      - NEXT_PUBLIC_GRAPHQL_URL=/graphql
+    ports:
+      - "3000:3000"
+    depends_on:
+      - server-1
+      - server-2
+    networks:
+      - cosphere_network
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: cosphere_gateway
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - client
+      - server-1
+      - server-2
+    networks:
+      - cosphere_network
+
+volumes:
+  pgdata:
+
+networks:
+  cosphere_network:
+    driver: bridge

@@ -1,0 +1,15 @@
+{
+  "name": "cosphere-root",
+  "version": "1.0.0",
+  "description": "Root package manager for CoSphere workspaces",
+  "scripts": {
+    "install:all": "npm install --prefix server-1 && npm install --prefix client",
+    "dev:server": "npm run dev --prefix server-1",
+    "dev:client": "npm run dev --prefix client",
+    "prisma:migrate": "npm run prisma:migrate --prefix server-1",
+    "prisma:generate": "npm run prisma:generate --prefix server-1"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
