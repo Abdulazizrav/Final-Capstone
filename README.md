@@ -17,7 +17,7 @@ graph TD
     Server1 -->|Redis Client| Redis[("Redis (Presence & Pub/Sub)")]
     
     Server2 -->|SQLAlchemy| Postgres
-    Server1 -.->|Redis Pub/Sub (Microservice Comm)| Server2
+    Server1 -.->|Redis Pub-Sub - Microservice Comm| Server2
 ```
 
 ---
