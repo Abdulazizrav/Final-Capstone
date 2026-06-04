@@ -106,8 +106,11 @@ export default function ProjectWorkspacePage() {
   useEffect(() => {
     if (!token || !user || isNaN(projectId)) return;
 
-    // Establish WebSocket connection via Gateway
-    const socketUrl = window.location.origin;
+    // Always connect via the nginx gateway (default HTTP port 80), not the
+    // Next.js dev port. window.location.origin includes ":3000" when Next.js
+    // is accessed directly, which has no socket.io server. Using
+    // protocol+hostname (no port) ensures we always hit nginx -> server-1.
+    const socketUrl = `${window.location.protocol}//${window.location.hostname}`;
     const socketConn = io(socketUrl, {
       path: '/socket.io/',
       transports: ['websocket', 'polling'],

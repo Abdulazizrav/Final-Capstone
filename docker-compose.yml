@@ -69,11 +69,13 @@ services:
     container_name: cosphere_client
     restart: always
     environment:
-      # INTERNAL_API_URL: used by next.config.js rewrites (server-side, Docker network)
+      # INTERNAL_* URLs: used by next.config.js rewrites (server-side, Docker network)
       - INTERNAL_API_URL=http://server-1:5001
+      - INTERNAL_ANALYTICS_URL=http://server-2:8000
       # NEXT_PUBLIC_* are browser-exposed — used for socket.io origin (goes via nginx)
       - NEXT_PUBLIC_WS_URL=/
       - NEXT_PUBLIC_GRAPHQL_URL=/graphql
+
     ports:
       - "3000:3000"
     depends_on:
