@@ -9,19 +9,23 @@ import { Plus, LayoutGrid, LogOut, Folder, Users, Activity, Loader2, ArrowRight 
 export default function DashboardPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { token, user, logout } = useStore();
-  
+  const { token, user, logout, hydrateAuth, isHydrated } = useStore();
+
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [newProjName, setNewProjName] = useState('');
   const [newProjDesc, setNewProjDesc] = useState('');
   const [createError, setCreateError] = useState('');
 
+  useEffect(() => {
+    hydrateAuth();
+  }, [hydrateAuth]);
+
   // Authentication check
   useEffect(() => {
-    if (!token) {
+    if (isHydrated && !token) {
       router.push('/login');
     }
-  }, [token, router]);
+  }, [isHydrated, token, router]);
 
   // Fetch projects list
   const { data: projects, isLoading, error } = useQuery({
@@ -35,7 +39,7 @@ export default function DashboardPage() {
       if (!res.ok) throw new Error('Failed to fetch projects');
       return res.json();
     },
-    enabled: !!token,
+    enabled: isHydrated && !!token,
   });
 
   // Create Project mutation
@@ -73,7 +77,7 @@ export default function DashboardPage() {
     createMutation.mutate({ name: newProjName, description: newProjDesc });
   };
 
-  if (!token || isLoading) {
+  if (!isHydrated || !token || isLoading) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-[#09090b]">
         <Loader2 className="w-10 h-10 text-indigo-500 animate-spin mb-4" />
@@ -118,7 +122,7 @@ export default function DashboardPage() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 mt-10 relative z-10">
-        
+
         {/* Welcome Section */}
         <div className="glass-panel rounded-2xl p-8 mb-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 shadow-premium">
           <div>
@@ -129,7 +133,7 @@ export default function DashboardPage() {
               Track tasks collaboratively in real-time, view live dashboard analytics computed by Server 2, and stay in touch with your team.
             </p>
           </div>
-          
+
           <button
             onClick={() => setIsModalOpen(true)}
             className="flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 px-5 py-3 rounded-xl text-sm font-bold text-white shadow-indigo shadow-lg transition"
@@ -160,7 +164,7 @@ export default function DashboardPage() {
                 <div className="absolute top-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity">
                   <ArrowRight className="w-5 h-5 text-indigo-400" />
                 </div>
-                
+
                 <h4 className="text-lg font-extrabold text-white mb-2 group-hover:text-indigo-400 transition-colors">
                   {project.name}
                 </h4>
@@ -204,7 +208,7 @@ export default function DashboardPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="w-full max-w-md glass-panel rounded-xl p-6 shadow-premium relative">
             <h3 className="text-xl font-bold text-white mb-4">Create New Project</h3>
-            
+
             {createError && (
               <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 text-red-200 text-sm rounded-lg">
                 {createError}

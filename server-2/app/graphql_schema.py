@@ -100,6 +100,7 @@ class Query:
             import os
             import json
             active_users_count = 0
+            r = None
             try:
                 redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
                 r = redis.Redis.from_url(redis_url, decode_responses=True)
@@ -108,6 +109,9 @@ class Query:
                 active_users_count = len(active_users)
             except Exception as e:
                 print("Failed to fetch presence from Redis for Analytics:", e)
+            finally:
+                if r is not None:
+                    r.close()
 
             return ProjectAnalytics(
                 projectId=project_id,

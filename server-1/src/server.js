@@ -14,6 +14,7 @@ const io = new Server(server, {
   cors: {
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: false,
   },
 });
 
@@ -120,7 +121,7 @@ io.on('connection', (socket) => {
   // Disconnect handler
   socket.on('disconnect', async () => {
     console.log(`User disconnected: ${socket.id}`);
-    
+
     // Remove from presence tracking in Redis
     if (socket.projectId && socket.userId && redisClient && redisClient.isOpen) {
       const presenceKey = `project:${socket.projectId}:presence`;

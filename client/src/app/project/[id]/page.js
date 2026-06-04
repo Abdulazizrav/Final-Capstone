@@ -1,17 +1,32 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+
+function formatDueDate(dueDate) {
+  if (!dueDate) return 'No due date';
+
+  const normalized = typeof dueDate === 'string' && dueDate.includes('T')
+    ? dueDate
+    : `${dueDate}T00:00:00Z`;
+
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'UTC',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  }).format(new Date(normalized));
+}
 import { useRouter, useParams } from 'next/navigation';
 import { useStore } from '@/store/useStore';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { io } from 'socket.io-client';
-import { 
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, 
-  PieChart, Pie, Cell, Legend 
+import {
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  PieChart, Pie, Cell, Legend
 } from 'recharts';
-import { 
-  ArrowLeft, MessageSquare, PieChart as ChartIcon, Kanban, 
-  Send, Plus, Trash2, Shield, Circle, User, Users, AlertCircle, 
+import {
+  ArrowLeft, MessageSquare, PieChart as ChartIcon, Kanban,
+  Send, Plus, Trash2, Shield, Circle, User, Users, AlertCircle,
   Clock, CheckCircle2, ChevronRight, ChevronLeft, Loader2
 } from 'lucide-react';
 
@@ -20,11 +35,12 @@ export default function ProjectWorkspacePage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const projectId = parseInt(params.id);
-  
-  const { token, user, activePresence, setActivePresence } = useStore();
+
+  const { token, user, activePresence, setActivePresence, hydrateAuth, isHydrated } = useStore();
   const [activeTab, setActiveTab] = useState('kanban'); // 'kanban' | 'analytics'
-  const [socket, setSocket] = useState(null);
-  
+  const socketRef = useRef(null);
+  const [socketConnected, setSocketConnected] = useState(false);
+
   // Workspace UI states
   const [tasks, setTasks] = useState([]);
   const [chatMessages, setChatMessages] = useState([]);
@@ -38,12 +54,16 @@ export default function ProjectWorkspacePage() {
   const [taskPriority, setTaskPriority] = useState('MEDIUM');
   const [taskDueDate, setTaskDueDate] = useState('');
 
+  useEffect(() => {
+    hydrateAuth();
+  }, [hydrateAuth]);
+
   // Authentication Guard
   useEffect(() => {
-    if (!token) {
+    if (isHydrated && !token) {
       router.push('/login');
     }
-  }, [token, router]);
+  }, [isHydrated, token, router]);
 
   // Fetch Project Details (REST server-1)
   const { data: project, isLoading: isProjectLoading, error: projectError } = useQuery({
@@ -57,15 +77,24 @@ export default function ProjectWorkspacePage() {
       if (!res.ok) throw new Error('Failed to fetch project details');
       return res.json();
     },
-    enabled: !!token && !isNaN(projectId),
+    enabled: isHydrated && !!token && !isNaN(projectId),
   });
 
-  // Sync initial tasks and chat messages from API response
+  // Sync initial tasks and chat messages from API response.
+  // Keep the live socket list intact on refetches so messages do not disappear.
   useEffect(() => {
-    if (project) {
-      setTasks(project.tasks || []);
-      setChatMessages(project.messages || []);
-    }
+    if (!project) return;
+
+    const normalizedMessages = (project.messages || []).map((msg) => ({
+      id: msg.id,
+      content: msg.content,
+      userId: msg.userId,
+      username: msg.username || msg.user?.name || 'Unknown user',
+      createdAt: msg.createdAt,
+    }));
+
+    setTasks(project.tasks || []);
+    setChatMessages((prev) => (prev.length > 0 ? prev : normalizedMessages));
   }, [project]);
 
   // Auto-scroll chat to bottom when new messages arrive
@@ -78,20 +107,37 @@ export default function ProjectWorkspacePage() {
     if (!token || !user || isNaN(projectId)) return;
 
     // Establish WebSocket connection via Gateway
-    const socketUrl = window.location.origin; // Socket connects to root, handled by Nginx proxy
+    const socketUrl = window.location.origin;
     const socketConn = io(socketUrl, {
-      transports: ['websocket'],
+      path: '/socket.io/',
+      transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: Infinity,   // Never give up — recovers from Docker restarts & network blips
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,       // Cap backoff at 5s so reconnects stay snappy
+      timeout: 10000,
+      forceNew: true,
     });
 
-    setSocket(socketConn);
+    socketRef.current = socketConn;
 
     socketConn.on('connect', () => {
       console.log('Connected to Workspace Sockets');
+      setSocketConnected(true);
       socketConn.emit('join_project', {
         projectId,
         userId: user.id,
         username: user.name
       });
+    });
+
+    socketConn.on('disconnect', () => {
+      setSocketConnected(false);
+    });
+
+    socketConn.on('connect_error', (error) => {
+      console.error('Socket connection error:', error);
+      setSocketConnected(false);
     });
 
     // Real-time Event Listeners
@@ -100,7 +146,18 @@ export default function ProjectWorkspacePage() {
     });
 
     socketConn.on('new_message', (msg) => {
-      setChatMessages((prev) => [...prev, msg]);
+      const normalizedMsg = {
+        ...msg,
+        username: msg.username || msg.user?.name || 'Unknown user',
+      };
+
+      setChatMessages((prev) => {
+        // Use id-based dedup only — server always provides the persisted DB id
+        if (prev.some((existing) => existing.id === normalizedMsg.id)) {
+          return prev;
+        }
+        return [...prev, normalizedMsg];
+      });
     });
 
     socketConn.on('task_created', (newTask) => {
@@ -124,7 +181,7 @@ export default function ProjectWorkspacePage() {
   }, [token, user, projectId, setActivePresence, queryClient]);
 
   // Fetch Analytics from GraphQL Microservice (server-2)
-  const { data: analytics, refetch: refetchAnalytics, isLoading: isAnalyticsLoading } = useQuery({
+  const { data: analytics, refetch: refetchAnalytics, isLoading: isAnalyticsLoading, error: analyticsError } = useQuery({
     queryKey: ['analytics', projectId],
     queryFn: async () => {
       const gqlQuery = `
@@ -162,19 +219,22 @@ export default function ProjectWorkspacePage() {
           variables: { projectId }
         })
       });
+      if (!res.ok) throw new Error(`GraphQL service returned HTTP ${res.status} — is server-2 running?`);
       const resData = await res.json();
       if (resData.errors) throw new Error(resData.errors[0].message);
       return resData.data.projectAnalytics;
     },
     enabled: !!token && !isNaN(projectId) && activeTab === 'analytics',
+    retry: 2,
+    retryDelay: 1500,
   });
 
-  // Trigger refetch of analytics when entering tab
+  // Trigger refetch of analytics when entering tab (only when not already loading)
   useEffect(() => {
-    if (activeTab === 'analytics') {
+    if (activeTab === 'analytics' && !isAnalyticsLoading) {
       refetchAnalytics();
     }
-  }, [activeTab, refetchAnalytics]);
+  }, [activeTab]); // intentionally omit refetchAnalytics/isAnalyticsLoading to avoid refetch loops
 
   // Mutators for Tasks (via REST server-1)
   const createTaskMutation = useMutation({
@@ -211,6 +271,19 @@ export default function ProjectWorkspacePage() {
       });
       if (!res.ok) throw new Error('Failed to update task status');
       return res.json();
+    },
+    onMutate: ({ taskId, newStatus }) => {
+      // Optimistically update local state immediately — no refresh needed
+      setTasks((prev) => prev.map(t => t.id === taskId ? { ...t, status: newStatus } : t));
+    },
+    onError: (_err, { taskId }, _ctx) => {
+      // Revert on failure by re-fetching project data
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+    },
+    onSuccess: (updatedTask) => {
+      // Ensure local state reflects what the server confirmed
+      setTasks((prev) => prev.map(t => t.id === updatedTask.id ? updatedTask : t));
+      queryClient.invalidateQueries({ queryKey: ['analytics', projectId] });
     }
   });
 
@@ -229,13 +302,19 @@ export default function ProjectWorkspacePage() {
 
   // Actions
   const handleSendChat = (e) => {
-    e.preventDefault();
-    if (!chatInput.trim() || !socket) return;
+    if (e && e.preventDefault) e.preventDefault();
+    const trimmed = chatInput.trim();
+    if (!trimmed) return;
+    const socket = socketRef.current;
+    if (!socket) {
+      console.warn('Socket not initialised yet');
+      return;
+    }
     socket.emit('send_message', {
       projectId,
       userId: user.id,
       username: user.name,
-      content: chatInput.trim()
+      content: trimmed
     });
     setChatInput('');
   };
@@ -324,22 +403,20 @@ export default function ProjectWorkspacePage() {
           <div className="flex bg-white/5 p-1 rounded-xl border border-white/5">
             <button
               onClick={() => setActiveTab('kanban')}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all ${
-                activeTab === 'kanban' 
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo/20' 
-                  : 'text-zinc-400 hover:text-white'
-              }`}
+              className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all ${activeTab === 'kanban'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo/20'
+                : 'text-zinc-400 hover:text-white'
+                }`}
             >
               <Kanban className="w-3.5 h-3.5" />
               Kanban Board
             </button>
             <button
               onClick={() => setActiveTab('analytics')}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all ${
-                activeTab === 'analytics' 
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo/20' 
-                  : 'text-zinc-400 hover:text-white'
-              }`}
+              className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold transition-all ${activeTab === 'analytics'
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo/20'
+                : 'text-zinc-400 hover:text-white'
+                }`}
             >
               <ChartIcon className="w-3.5 h-3.5" />
               Workspace Analytics (GraphQL)
@@ -356,7 +433,7 @@ export default function ProjectWorkspacePage() {
 
       {/* Main Split Screen Body */}
       <div className="flex-1 flex flex-col lg:flex-row max-w-7xl w-full mx-auto px-6 py-6 gap-6 relative z-10 overflow-hidden">
-        
+
         {/* Left Side: Dynamic Workspace Area (Kanban or Analytics) */}
         <div className="flex-1 min-w-0">
           {activeTab === 'kanban' && (
@@ -376,7 +453,7 @@ export default function ProjectWorkspacePage() {
 
               {/* Board Columns Grid */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 items-start">
-                
+
                 {/* Column: TODO */}
                 <div className="glass-panel rounded-xl p-4 flex flex-col min-h-[500px]">
                   <div className="flex items-center justify-between mb-4 pb-2 border-b border-white/5">
@@ -388,12 +465,12 @@ export default function ProjectWorkspacePage() {
                       {todoTasks.length}
                     </span>
                   </div>
-                  
+
                   <div className="space-y-3 flex-1 overflow-y-auto">
                     {todoTasks.map(task => (
-                      <TaskCard 
-                        key={task.id} 
-                        task={task} 
+                      <TaskCard
+                        key={task.id}
+                        task={task}
                         onShift={(dir) => shiftTaskStatus(task.id, task.status, dir)}
                         onDelete={() => deleteTaskMutation.mutate(task.id)}
                       />
@@ -418,9 +495,9 @@ export default function ProjectWorkspacePage() {
 
                   <div className="space-y-3 flex-1 overflow-y-auto">
                     {inProgressTasks.map(task => (
-                      <TaskCard 
-                        key={task.id} 
-                        task={task} 
+                      <TaskCard
+                        key={task.id}
+                        task={task}
                         onShift={(dir) => shiftTaskStatus(task.id, task.status, dir)}
                         onDelete={() => deleteTaskMutation.mutate(task.id)}
                       />
@@ -445,9 +522,9 @@ export default function ProjectWorkspacePage() {
 
                   <div className="space-y-3 flex-1 overflow-y-auto">
                     {doneTasks.map(task => (
-                      <TaskCard 
-                        key={task.id} 
-                        task={task} 
+                      <TaskCard
+                        key={task.id}
+                        task={task}
                         onShift={(dir) => shiftTaskStatus(task.id, task.status, dir)}
                         onDelete={() => deleteTaskMutation.mutate(task.id)}
                       />
@@ -469,6 +546,20 @@ export default function ProjectWorkspacePage() {
                 <div className="py-20 flex flex-col items-center justify-center">
                   <Loader2 className="w-8 h-8 text-indigo-500 animate-spin mb-3" />
                   <p className="text-sm text-zinc-500">Querying Server 2 GraphQL endpoints...</p>
+                </div>
+              ) : analyticsError ? (
+                <div className="py-20 text-center glass-panel rounded-xl flex flex-col items-center gap-4">
+                  <AlertCircle className="w-10 h-10 text-pink-500" />
+                  <div>
+                    <p className="text-white font-bold mb-1">GraphQL Analytics Unavailable</p>
+                    <p className="text-zinc-500 text-xs max-w-sm mx-auto">{analyticsError.message}</p>
+                  </div>
+                  <button
+                    onClick={() => refetchAnalytics()}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition"
+                  >
+                    <Loader2 className="w-3.5 h-3.5" /> Retry GraphQL Query
+                  </button>
                 </div>
               ) : analytics ? (
                 <>
@@ -561,14 +652,14 @@ export default function ProjectWorkspacePage() {
 
         {/* Right Side: Socket.io Chat & Team Presence sidebar */}
         <div className="w-full lg:w-80 flex flex-col gap-6">
-          
+
           {/* Active Members Online Presence Widget */}
           <div className="glass-panel rounded-xl p-4 flex flex-col">
             <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-1.5">
               <Users className="w-4 h-4 text-indigo-400" />
               Active Collaborators
             </h3>
-            
+
             <div className="space-y-2">
               {activePresence && activePresence.length > 0 ? (
                 activePresence.map((usr) => (
@@ -594,7 +685,7 @@ export default function ProjectWorkspacePage() {
               <MessageSquare className="w-4 h-4 text-indigo-400" />
               Project Live Stream
             </h3>
-            
+
             {/* Scrollable messages area */}
             <div className="flex-1 overflow-y-auto p-4 space-y-3">
               {chatMessages.map((msg) => {
@@ -602,11 +693,10 @@ export default function ProjectWorkspacePage() {
                 return (
                   <div key={msg.id} className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}>
                     <span className="text-[10px] text-zinc-500 mb-0.5 px-1">{msg.username}</span>
-                    <div className={`max-w-[85%] rounded-lg px-3 py-1.5 text-xs ${
-                      isMe 
-                        ? 'bg-indigo-600 text-white rounded-tr-none' 
-                        : 'bg-white/5 text-zinc-200 rounded-tl-none border border-white/5'
-                    }`}>
+                    <div className={`max-w-[85%] rounded-lg px-3 py-1.5 text-xs ${isMe
+                      ? 'bg-indigo-600 text-white rounded-tr-none'
+                      : 'bg-white/5 text-zinc-200 rounded-tl-none border border-white/5'
+                      }`}>
                       {msg.content}
                     </div>
                   </div>
@@ -616,21 +706,33 @@ export default function ProjectWorkspacePage() {
             </div>
 
             {/* Input Box */}
-            <form onSubmit={handleSendChat} className="p-3 border-t border-white/5 flex gap-2">
-              <input
-                type="text"
-                placeholder="Send a live message..."
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                className="flex-1 px-3 py-2 rounded-lg text-xs glass-input"
-              />
-              <button
-                type="submit"
-                className="p-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 active:bg-indigo-700 transition"
-              >
-                <Send className="w-3.5 h-3.5" />
-              </button>
-            </form>
+            <div className="p-3 border-t border-white/5 flex flex-col gap-1.5">
+              {!socketConnected && (
+                <p className="text-[10px] text-yellow-500/80 text-center">Connecting to live chat...</p>
+              )}
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder={socketConnected ? "Send a live message..." : "Connecting..."}
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendChat(e);
+                    }
+                  }}
+                  className="flex-1 px-3 py-2 rounded-lg text-xs glass-input"
+                />
+                <button
+                  onClick={handleSendChat}
+                  disabled={!chatInput.trim()}
+                  className="p-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 active:bg-indigo-700 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
 
           </div>
 
@@ -643,7 +745,7 @@ export default function ProjectWorkspacePage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="w-full max-w-md glass-panel rounded-xl p-6 shadow-premium relative">
             <h3 className="text-xl font-bold text-white mb-4">Add Task Card</h3>
-            
+
             <form onSubmit={handleCreateTaskSubmit} className="space-y-4">
               <div className="space-y-1">
                 <label className="text-xs text-zinc-400 font-semibold">Card Title</label>
@@ -734,7 +836,7 @@ function TaskCard({ task, onShift, onDelete }) {
         <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold tracking-wider border ${priColor}`}>
           {task.priority}
         </span>
-        
+
         {/* Delete button (shows on hover) */}
         <button
           onClick={onDelete}
@@ -758,7 +860,7 @@ function TaskCard({ task, onShift, onDelete }) {
       <div className="flex items-center justify-between pt-3 border-t border-white/5 mt-auto">
         <div className="flex items-center gap-1 text-[10px] text-zinc-500">
           <Clock className="w-3 h-3 text-indigo-400" />
-          <span>{task.dueDate ? new Date(task.dueDate).toLocaleDateString() : 'No due date'}</span>
+          <span>{formatDueDate(task.dueDate)}</span>
         </div>
 
         {/* Navigation arrow buttons to move card status */}

@@ -2,26 +2,13 @@ import os
 import json
 import redis
 import threading
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from strawberry.fastapi import GraphQLRouter
 from .graphql_schema import schema
 
-app = FastAPI(title="CoSphere Analytics Service", version="1.0.0")
 
-# Allow CORS for frontends and tools
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-graphql_router = GraphQLRouter(schema)
-app.include_router(graphql_router, prefix="/graphql")
-
-# Redis Background Event Subscriber (Microservice Communication)
 def redis_event_subscriber():
     redis_url = os.getenv("REDIS_URL", "redis://redis:6379")
     print(f"[FastAPI Listener] Connecting to Redis at {redis_url}...", flush=True)
@@ -50,12 +37,30 @@ def redis_event_subscriber():
     except Exception as connection_err:
         print(f"[FastAPI Listener] Redis connection or subscription failed: {connection_err}", flush=True)
 
-@app.on_event("startup")
-def startup_event():
-    # Start Redis subscription listener in a daemon background thread
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start Redis subscription listener in a daemon background thread on startup
     listener_thread = threading.Thread(target=redis_event_subscriber, daemon=True)
     listener_thread.start()
     print("[FastAPI Startup] Microservice background thread started.", flush=True)
+    yield
+    # Shutdown logic (if needed) goes here
+
+
+app = FastAPI(title="CoSphere Analytics Service", version="1.0.0", lifespan=lifespan)
+
+# Allow CORS for frontends and tools
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+graphql_router = GraphQLRouter(schema)
+app.include_router(graphql_router, prefix="/graphql")
 
 @app.get("/")
 def read_root():
